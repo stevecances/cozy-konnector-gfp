@@ -19,7 +19,7 @@ const request = requestFactory({
   jar: true
 })
 
-const baseUrl = 'http://books.toscrape.com'
+const baseUrl = 'https://assure.plansante.com/assures'
 
 module.exports = new BaseKonnector(start)
 
@@ -32,10 +32,11 @@ async function start(fields) {
   log('info', 'Successfully logged in')
   // The BaseKonnector instance expects a Promise as return of the function
   log('info', 'Fetching the list of documents')
-  const $ = await request(`${baseUrl}/index.html`)
+  const $ = await request(`${baseUrl}/paiements`)
   // cheerio (https://cheerio.js.org/) uses the same api as jQuery (http://jquery.com/)
   log('info', 'Parsing list of documents')
   const documents = await parseDocuments($)
+  log('debug', documents)
 
   // here we use the saveBills function even if what we fetch are not bills, but this is the most
   // common case in connectors
@@ -44,7 +45,7 @@ async function start(fields) {
     // this is a bank identifier which will be used to link bills to bank operations. These
     // identifiers should be at least a word found in the title of a bank operation related to this
     // bill. It is not case sensitive.
-    identifiers: ['books']
+    identifiers: ['paiements']
   })
 }
 
@@ -52,25 +53,20 @@ async function start(fields) {
 // even if this in another domain here, but it works as an example
 function authenticate(username, password) {
   return signin({
-    url: `http://quotes.toscrape.com/login`,
+    url: `${baseUrl}/auth`,
     formSelector: 'form',
-    formData: { username, password },
+    formData: { identifier: username, password: password },
     // the validate function will check if the login request was a success. Every website has
     // different ways respond: http status code, error message in html ($), http redirection
     // (fullResponse.request.uri.href)...
-    validate: (statusCode, $, fullResponse) => {
-      log(
-        'debug',
-        fullResponse.request.uri.href,
-        'not used here but should be usefull for other connectors'
-      )
-      // The login in toscrape.com always works excepted when no password is set
-      if ($(`a[href='/logout']`).length === 1) {
+    validate: (statusCode, $) => {
+      if ($(`a[href='/assures/deconnect']`).length === 1) {
+        log('info', 'Authenticating success')
         return true
       } else {
         // cozy-konnector-libs has its own logging function which format these logs with colors in
         // standalone and dev mode and as JSON in production mode
-        log('error', $('.error').text())
+        log('error', $('ul.js-formErrors li').text(), 'Authenticating failed')
         return false
       }
     }
@@ -86,44 +82,52 @@ function parseDocuments($) {
     $,
     {
       title: {
-        sel: 'h3 a',
-        attr: 'title'
+        sel: 'div.col-md-3',
+        parse: parseDate
+      },
+      date: {
+        sel: 'div.col-md-3',
+        parse: text => new Date(parseDate(text))
       },
       amount: {
-        sel: '.price_color',
-        parse: normalizePrice
+        sel: 'div.col-md-2',
+        parse: parseAmount
       },
       fileurl: {
-        sel: 'img',
-        attr: 'src',
-        parse: src => `${baseUrl}/${src}`
+        sel: 'div.row',
+        fn: $node =>
+          `${baseUrl}/paiements/download/${$($node[0].parent).index() - 3}`
       },
       filename: {
-        sel: 'h3 a',
-        attr: 'title',
-        parse: title => `${title}.jpg`
+        sel: 'div.col-md-3',
+        parse: text => `detail_remboursements_${parseDate(text)}.pdf`
       }
     },
-    'article'
+    'div.well'
   )
+  const importDate = new Date()
   return docs.map(doc => ({
     ...doc,
-    // the saveBills function needs a date field
-    // even if it is a little artificial here (these are not real bills)
-    date: new Date(),
     currency: '€',
-    vendor: 'template',
+    vendor: 'GFP',
     metadata: {
       // it can be interesting that we add the date of import. This is not mandatory but may be
       // useful for debugging or data migration
-      importDate: new Date(),
+      importDate: importDate,
       // document version, useful for migration after change of document structure
       version: 1
     }
   }))
 }
 
-// convert a price string to a float
-function normalizePrice(price) {
-  return parseFloat(price.replace('£', '').trim())
+function parseDate(text) {
+  const regex = /.*?Date de remboursement\n.*?(\d{1,2})\/(\d{1,2})\/(\d{1,4}).*?/gm
+  const matches = regex.exec(text.replace(/^\s+|\s+$/g, ''))
+  return `${matches[3]}-${matches[2]}-${matches[1]}`
+}
+
+function parseAmount(text) {
+  const regex = /.*?Montant\n.*?(\d+,?\d*) €.*?/gm
+  const matches = regex.exec(text.replace(/^\s+|\s+$/g, ''))
+  return parseFloat(matches[1].replace(',', '.'))
 }
